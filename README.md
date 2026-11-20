@@ -13,7 +13,7 @@
 
 # A persistent workspace for every story
 
-Facility is an open-source, self-hosted platform for teams working with Claude Code and Codex.
+Facility is an open-source, self-hosted platform for teams working with coding agents.
 Each task keeps a shared conversation, a development environment, and a record of the changes made.
 People and agents can continue the work, try the running application, and review the pull request.
 
@@ -23,6 +23,92 @@ when an agent finishes or compute stops. The next turn continues in the same wor
 [How it works](#how-the-work-moves) · [Run it locally](#quick-start-run-facility) ·
 [Self-hosting guide](apps/docs/docs/self-host/quickstart.md) ·
 [Security model](apps/docs/docs/reference/security.md)
+
+## What's in this fork
+
+This fork adds Hermes with LM Studio, expands the story run view, and fixes Windows
+development startup. It builds on [upstream Facility](https://github.com/theam/facility).
+
+| Change | What you can do |
+| --- | --- |
+| **Hermes with LM Studio** | Select a Hermes agent in a story and run it against a local model. Follow-up turns can resume the Hermes session in the same workspace. |
+| **Run progress** | See which phase is active, how long it has been running, and when it last updated. Git clone and fetch show percentages when Git reports them. The agent phase shows activity such as waiting for the model, running a tool, or generating a reply. |
+| **Live transcript and diagnostics** | Follow timestamped tool events and streamed reply text as the engine reports them. The transcript shows the newest entries first. Hermes, Claude Code, and Codex use this view, with details depending on the engine. Provider errors can surface here, including requests that exceed the model's context window. |
+| **Windows startup** | Run `pnpm dev` from PowerShell. The launcher uses Node to invoke Corepack and finds the project's pinned pnpm for child processes. The worker uses a file URL comparison that handles Windows paths. |
+
+### Run details in action
+
+![Facility showing repository clone progress with a percentage and the active project environment phase](assets/screenshots/repository-clone-progress.png)
+
+<details>
+<summary>Hermes agent selection</summary>
+
+![Story composer showing Hermes and its local model in the Run as menu](assets/screenshots/hermes-selector.png)
+
+</details>
+
+<details>
+<summary>Waiting for the model and tracking tool activity</summary>
+
+![Run details showing that Hermes is waiting for the model](assets/screenshots/waiting-for-model.png)
+
+![Live transcript showing timestamped terminal and file-read events with tool durations](assets/screenshots/agent-tool-activity.png)
+
+</details>
+
+<details>
+<summary>Streaming and completed replies</summary>
+
+![Hermes streaming a repository summary into the live transcript](assets/screenshots/live-transcript.png)
+
+![The completed Hermes repository summary rendered in the story conversation](assets/screenshots/completed-reply.png)
+
+</details>
+
+<details>
+<summary>Provider error details</summary>
+
+![A Claude Code run displaying the provider error for a request that exceeded the model's context window](assets/screenshots/error-diagnostics.png)
+
+</details>
+
+### Start the fork on Windows
+
+With Docker Desktop running, use Node.js 24 LTS and pnpm 11.28.2. For a fresh checkout,
+run these commands in PowerShell:
+
+```powershell
+git clone --branch hermes-windows-updates https://github.com/javiersantoro/facility.git
+Set-Location facility
+pnpm dev
+```
+
+Open [the local Facility app](http://localhost:3400) once startup finishes. If you are
+switching from another local Facility checkout, stop its dev server and copy its `.env`
+to this checkout to keep the same local configuration. Existing PostgreSQL volumes
+also retain checksums for applied migrations. If switching checkouts gives you a
+`MigrationChecksumError` and the SQL differs only in line endings, restore the exact
+SQL file bytes from the checkout that applied the migrations.
+
+### Use Hermes with LM Studio
+
+1. Load a model and start the local API server in LM Studio. Use an address the Docker
+   workspace can reach, such as `http://host.docker.internal:1234/v1` with Docker Desktop.
+2. From the Facility fork's root, build the base runner and its Hermes extension.
+
+   ```powershell
+   docker build -f runner/Dockerfile -t facility-runner:dev .
+   docker build -f runner/Dockerfile.hermes -t facility-runner:hermes .
+   ```
+
+3. In the connected repository, set the workspace image to `facility-runner:hermes`
+   and expose `HERMES_LM_STUDIO_URL` in `.facility.yml`. Add a manifest in `.agents/`
+   with `engine: hermes` and the exact model ID reported by LM Studio.
+4. Set the matching project-scoped URL and optional token in Facility's local `.env`.
+   Restart Facility, open a new story, and select Hermes from **Run as**.
+
+See [Hermes with LM Studio](apps/docs/docs/reference/agent-manifest.md#hermes-with-lm-studio)
+for example manifests, environment variable names, and execution limits.
 
 ## Status
 
@@ -39,7 +125,7 @@ improve the next release.
 1. **Choose the work.** Start a story from a GitHub issue or an ad hoc request. Repository-defined
    agents can also respond to configured GitHub events and schedules.
 2. **Continue with an agent.** Facility prepares the repository's development environment and runs
-   the selected Claude Code or Codex agent. People can steer the shared conversation, and later
+   the selected agent. People can steer the shared conversation, and later
    turns can use another agent in the same workspace.
 3. **Check the running result.** Run the repository's tests and open an authenticated preview of
    its declared services. The preview uses the story workspace, including its current files and
@@ -64,12 +150,12 @@ The project manifest also lets you [choose CPU and memory for new story workspac
 
 You need Docker, Node.js 24 LTS, and pnpm 11.28.2. Node.js 22 is also supported
 from 22.13.0. Start the application locally, then connect a repository to run
-Claude Code or Codex in a story workspace.
+Claude Code, Codex, or Hermes in a story workspace.
 
 ### 1. Open the local application
 
 ```bash
-git clone https://github.com/theam/facility.git
+git clone --branch hermes-windows-updates https://github.com/javiersantoro/facility.git
 cd facility
 corepack install --global pnpm@11.28.2
 pnpm dev

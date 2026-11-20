@@ -1,10 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { ACTIVITY_TEXT_LIMIT, presentTurnEvent } from "../src/turns/activity.js";
+import {
+  ACTIVITY_TEXT_LIMIT,
+  presentRunProgress,
+  presentTurnEvent,
+} from "../src/turns/activity.js";
 import {
   ClaudeEventParser,
   CodexEventParser,
   separateFinalResponse,
 } from "../src/turns/engines.js";
+
+import { redactEngineActivity } from "../src/turns/redaction.js";
+import { gitProgressReader } from "../src/workspaces/project-environment.js";
 
 const at = new Date("2026-09-10T10:00:00Z");
 
@@ -23,6 +30,151 @@ it.each([
   expect(activity.title).toBe(title);
   expect(activity.text).toContain("journal");
   expect(activity.kind).toBe(state === "failed" ? "error" : "lifecycle");
+});
+
+it("reads Git progress split across chunks without retaining arbitrary stderr", () => {
+  const read = gitProgressReader();
+  expect(read("remote: Receiving objects: 90% private\rReceiv")).toBeUndefined();
+  expect(read("ing objects:  42% (42/100), 3.1 MiB | 1 MiB/s\r")).toEqual({
+    detail: "Receiving objects",
+    percent: 42,
+  });
+  expect(read("warning: transport token private\nResolving deltas: 101%\r")).toBeUndefined();
+  expect(read("Resolving deltas:  0%\rResolving deltas:  8%\r")).toEqual({
+    detail: "Resolving deltas",
+    percent: 8,
+  });
+});
+
+it("projects real progress and preserves an older run's phase", () => {
+  const step = {
+    step: "Cloning app",
+    detail: "Receiving objects",
+    percent: 42,
+    startedAt: at.toISOString(),
+  };
+  expect(presentRunProgress(event("turn.environment_progress", step))).toEqual({
+    phase: "environment",
+    title: "Cloning app",
+    detail: "Receiving objects",
+    percent: 42,
+    started_at: at.toISOString(),
+    updated_at: at.toISOString(),
+  });
+  expect(presentRunProgress(event("turn.phase", { phase: "environment" }))).toMatchObject({
+    title: "Preparing the environment",
+    percent: null,
+  });
+  expect(presentRunProgress(event("turn.phase", { phase: "unknown" }))).toBeNull();
+});
+
+it("presents live Hermes status without copying tool arguments or answer chunks", () => {
+  const started = new Date(at.getTime() - 5_000);
+  expect(presentRunProgress(event("engine.system", { subtype: "init" }), started)).toMatchObject({
+    phase: "agent",
+    title: "Waiting for the model",
+    percent: null,
+    started_at: started.toISOString(),
+  });
+  expect(
+    presentRunProgress(
+      event("engine.tool_use", { name: "read_file", input: { path: "private.txt" } }),
+    ),
+  ).toMatchObject({ title: "Tool started: read file" });
+  expect(
+    presentTurnEvent(
+      event("engine.tool_result", {
+        name: "read_file",
+        is_error: true,
+        output: "private file data",
+        duration_ms: 200,
+      }),
+    ),
+  ).toMatchObject({ kind: "error", title: "Tool failed: read file", text: "Duration 200 ms" });
+  const generating = presentRunProgress(
+    event("engine.text", { text: "private text fragment" }),
+    started,
+  );
+  expect(generating).toMatchObject({
+    title: "Generating a reply",
+    percent: null,
+    started_at: started.toISOString(),
+  });
+  expect(JSON.stringify(generating)).not.toContain("private text fragment");
+});
+
+it.each([
+  ["engine.reply_started", {}, "Generating a reply"],
+  [
+    "engine.assistant",
+    { message: { content: [{ type: "tool_use", name: "Read" }] } },
+    "Tool started: Read",
+  ],
+  [
+    "engine.user",
+    { message: { content: [{ type: "tool_result", is_error: true }] } },
+    "Tool failed",
+  ],
+  ["engine.turn.started", {}, "Waiting for the model"],
+  [
+    "engine.item.started",
+    { item: { type: "command_execution", command: "echo private" } },
+    "Running command",
+  ],
+  [
+    "engine.item.completed",
+    { item: { type: "command_execution", exit_code: 1 } },
+    "Command exit 1",
+  ],
+  [
+    "engine.item.updated",
+    { item: { type: "agent_message", text: "private" } },
+    "Generating a reply",
+  ],
+  [
+    "engine.item.completed",
+    { item: { type: "reasoning", text: "private" } },
+    "Model progress reported",
+  ],
+] as const)("projects live agent update %s", (type, data, title) => {
+  const progress = presentRunProgress(event(type, data));
+  expect(progress).toMatchObject({ phase: "agent", title, percent: null });
+  expect(JSON.stringify(progress)).not.toContain("private");
+});
+
+it("redacts credentials split across reply snapshots before projecting transcript text", () => {
+  const secret = "key-sensitive-value";
+  const type = "reply_text";
+  const draft = redactEngineActivity(
+    {
+      type,
+      data: {
+        stream_id: "reply",
+        complete: false,
+        text: "Reviewing the file. key-sensitive",
+      },
+    },
+    [secret],
+  );
+  expect(draft.text).toBe("Reviewing the file. ");
+  const finished = redactEngineActivity(
+    {
+      type,
+      data: {
+        stream_id: "reply",
+        complete: true,
+        text: "Reviewing the file. key-sensitive-value",
+      },
+    },
+    [secret],
+  );
+  const display = presentTurnEvent(event("engine.reply_text", finished));
+  expect(display).toMatchObject({
+    kind: "message",
+    stream_id: "reply",
+    text: "Reviewing the file. [REDACTED]",
+  });
+  expect(JSON.stringify(display)).not.toContain(secret);
 });
 
 describe("engine final response separation", () => {
@@ -153,6 +305,20 @@ describe("turn activity presentation", () => {
     expect(
       presentTurnEvent(event("engine.turn.failed", { error: { message: "quota" } })),
     ).toMatchObject({ kind: "error", text: "quota" });
+  });
+
+  it("shows the saved Hermes diagnostic in run activity", () => {
+    const error = "Model context has 48,128 tokens. Hermes requires at least 64,000.";
+    expect(
+      presentTurnEvent(
+        event("engine.result", {
+          exit_code: 1,
+          session_id: "local-session",
+          text: "Something went wrong",
+          error,
+        }),
+      ),
+    ).toMatchObject({ kind: "error", title: "Hermes reported an error", text: error });
   });
 
   it("describes Claude blocks, tool results, and the final result", () => {

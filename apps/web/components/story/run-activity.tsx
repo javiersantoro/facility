@@ -1,12 +1,17 @@
 "use client";
 
 import { buttonClassName } from "@facility/ui";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { LoadMore, type LoadState } from "@/components/story/load-more";
 import type { StoryActivityItem, StoryTurnActivityPage, StoryTurnEvent } from "@/lib/api";
 import { clientApi } from "@/lib/client-api";
 import { storyActivityPath, storyTurnEventPath } from "@/lib/story-paths";
 import { formatTime } from "@/lib/story-presentation";
+
+const transcriptTime = new Intl.DateTimeFormat("en", {
+  dateStyle: "medium",
+  timeStyle: "medium",
+});
 
 const KIND_GLYPH: Record<StoryActivityItem["kind"], string> = {
   message: "💬",
@@ -44,6 +49,7 @@ function RunActivityView({
   progressMessages,
   initiallyOpen = false,
 }: Props) {
+  const [run, setRun] = useState<Pick<StoryTurnActivityPage, "turn" | "progress"> | null>(null);
   const [items, setItems] = useState<StoryActivityItem[]>([]);
   const [cursor, setCursor] = useState<number | null>(null);
   const [state, setState] = useState<LoadState>("idle");
@@ -93,6 +99,7 @@ function RunActivityView({
       }
       if (!loaded.current) {
         highWater.current = result.data.items[0]?.seq ?? 0;
+        setRun({ turn: result.data.turn, progress: result.data.progress });
         loaded.current = true;
       }
       setItems((current) => merge(current, result.data.items));
@@ -153,6 +160,7 @@ function RunActivityView({
             return;
           }
           incrementalSupported.current = true;
+          setRun({ turn: data.turn, progress: data.progress });
           highWater.current = seqs.at(-1) ?? after;
           pendingItems.current = merge(pendingItems.current, data.items);
           setPending(pendingItems.current);
@@ -170,19 +178,32 @@ function RunActivityView({
   useEffect(() => {
     if (initiallyOpen) void load();
   }, [initiallyOpen, load]);
+  const runActive = run?.turn.state === "running" || run?.turn.state === "queued";
+  const pollingInterval = runActive ? (run?.progress?.phase === "agent" ? 2_000 : 4_000) : 8_000;
   useEffect(() => {
     if (!open) return;
     const refresh = () => {
       if (document.visibilityState === "visible") void checkNew(true);
     };
-    const timer = setInterval(refresh, 8_000);
+    const timer = setInterval(refresh, pollingInterval);
     document.addEventListener("visibilitychange", refresh);
     return () => {
       clearInterval(timer);
       document.removeEventListener("visibilitychange", refresh);
     };
-  }, [open, checkNew]);
+  }, [open, checkNew, pollingInterval]);
 
+  const transcript = open ? transcriptItems(merge(items, pending)) : [];
+  const transcriptRef = useRef<HTMLOListElement>(null);
+  const followTranscript = useRef(true);
+  const latestTranscriptSeq = transcript[0]?.seq;
+  useLayoutEffect(() => {
+    const list = transcriptRef.current;
+    if (open && latestTranscriptSeq !== undefined && list && followTranscript.current)
+      list.scrollTop = 0;
+  }, [open, latestTranscriptSeq]);
+  const history = items.filter((item) => item.type !== "engine.reply_text");
+  const pendingHistory = pending.filter((item) => item.type !== "engine.reply_text");
   const control = buttonClassName({
     className: "focus-visible:outline-2 focus-visible:outline-(--info)",
   });
@@ -212,6 +233,68 @@ function RunActivityView({
           : ""}
       </summary>
       <div className="mt-3 flex flex-col gap-3">
+        {open && run ? <RunProgress {...run} /> : null}
+        {open && run ? (
+          <section
+            aria-label="Live transcript"
+            className="grid gap-2 rounded-lg border border-(--line) p-3"
+          >
+            <h4 className="text-sm font-medium text-(--ink)">Live transcript</h4>
+            {transcript.length ? (
+              <ol
+                ref={transcriptRef}
+                className="grid max-h-96 gap-3 overflow-y-auto"
+                onScroll={(event) => {
+                  followTranscript.current = event.currentTarget.scrollTop <= 24;
+                }}
+              >
+                {transcript.map((item) => (
+                  <li
+                    key={transcriptKey(item)}
+                    className="border-t border-(--line) pt-2 first:border-t-0"
+                  >
+                    <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                      <p className="text-xs font-medium text-(--ink)">{item.title}</p>
+                      <time
+                        className="font-mono text-[10px] text-(--dim)"
+                        dateTime={item.created_at}
+                      >
+                        {transcriptTime.format(new Date(item.created_at))}
+                      </time>
+                    </div>
+                    {item.transcript_text || item.text ? (
+                      <p className="mt-1 whitespace-pre-wrap break-words text-sm text-(--mut)">
+                        {item.transcript_text ?? item.text}
+                      </p>
+                    ) : null}
+                    {item.transcript_excerpt ? (
+                      <p className="mt-1 text-xs text-(--mut)">Excerpt</p>
+                    ) : null}
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <p className="text-xs text-(--mut)">
+                {runActive
+                  ? "Waiting for agent messages or tool activity."
+                  : "No transcript activity was recorded."}
+              </p>
+            )}
+            {cursor !== null ? (
+              <button
+                type="button"
+                className="w-fit text-xs text-(--info) underline"
+                disabled={state === "loading"}
+                onClick={() => {
+                  followTranscript.current = false;
+                  void load(cursor);
+                }}
+              >
+                Load earlier activity
+              </button>
+            ) : null}
+          </section>
+        ) : null}
         <p className="text-xs text-(--mut)">
           Recorded engine activity, newest first. While open, this view checks for updates. New
           items stay separate until you show them, so your reading position and opened evidence
@@ -221,16 +304,16 @@ function RunActivityView({
           <button
             type="button"
             className={control}
-            aria-disabled={pending.length === 0}
+            aria-disabled={pendingHistory.length === 0}
             onClick={() => {
-              if (!pendingItems.current.length) return;
+              if (!pendingHistory.length) return;
               const fresh = pendingItems.current;
               pendingItems.current = [];
               setPending([]);
               setItems((current) => merge(current, fresh));
             }}
           >
-            Show new activity ({pending.length})
+            Show new activity ({pendingHistory.length})
           </button>
           <button
             type="button"
@@ -244,8 +327,8 @@ function RunActivityView({
           <span role={open ? "status" : undefined} className="text-xs text-(--mut)">
             {moreNew
               ? "More new activity available; check again to continue."
-              : pending.length
-                ? `${pending.length} new items ready.`
+              : pendingHistory.length
+                ? `${pendingHistory.length} new items ready.`
                 : "No new items waiting to be shown."}
           </span>
         </div>
@@ -254,11 +337,11 @@ function RunActivityView({
             Could not update activity — {refreshError}
           </p>
         ) : null}
-        {items.length === 0 && state === "end" ? (
+        {history.length === 0 && state === "end" ? (
           <p className="text-sm text-(--mut)">No activity was recorded for this run.</p>
         ) : (
           <ol className="rounded-lg flex flex-col border border-(--line)">
-            {items.map((item) => (
+            {history.map((item) => (
               <ActivityRow
                 key={item.seq}
                 item={item}
@@ -280,6 +363,158 @@ function RunActivityView({
         ) : null}
       </div>
     </details>
+  );
+}
+
+function transcriptKey(item: StoryActivityItem) {
+  return item.stream_id !== undefined && (item.kind === "message" || item.kind === "result")
+    ? `stream-${item.stream_id}`
+    : `event-${item.seq}`;
+}
+
+function transcriptItems(newestFirst: StoryActivityItem[]) {
+  const entries = new Map<string, StoryActivityItem>();
+  let last: StoryActivityItem | undefined;
+  for (const item of newestFirst.toReversed()) {
+    if (
+      !item.type.startsWith("engine.") ||
+      !["message", "reasoning", "tool", "command", "file_change", "result", "error"].includes(
+        item.kind,
+      )
+    )
+      continue;
+    if (item.kind === "message" && !item.text) continue;
+    if (
+      item.kind === "result" &&
+      last?.kind === "message" &&
+      (item.transcript_text ?? item.text) === (last.transcript_text ?? last.text) &&
+      !item.transcript_excerpt &&
+      !last.transcript_excerpt
+    )
+      entries.delete(transcriptKey(last));
+    entries.set(transcriptKey(item), item);
+    last = item;
+  }
+  return [...entries.values()].sort((a, b) => b.seq - a.seq);
+}
+
+const RUN_PHASES = [
+  { id: "credentials", label: "GitHub access" },
+  { id: "workspace", label: "Workspace" },
+  { id: "environment", label: "Project environment" },
+  { id: "agent", label: "Agent" },
+] as const;
+
+function RunProgress({ turn, progress }: Pick<StoryTurnActivityPage, "turn" | "progress">) {
+  const active = turn.state === "running";
+  const ticking = active || turn.state === "queued";
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!ticking) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [ticking]);
+  const phaseIndex = RUN_PHASES.findIndex((phase) => phase.id === progress?.phase);
+  const done = turn.state === "succeeded";
+  const title = done
+    ? "Run completed"
+    : turn.state === "queued"
+      ? "Waiting for a worker"
+      : active
+        ? (progress?.title ?? "Starting the run")
+        : turn.state === "canceled"
+          ? "Run canceled"
+          : "Run stopped";
+  const detail = active
+    ? progress?.detail
+    : turn.state === "queued"
+      ? "Facility will begin when a worker picks up this run."
+      : !done && progress
+        ? `Last step: ${progress.title}`
+        : undefined;
+  const from = Date.parse((active && progress?.started_at) || turn.startedAt || turn.createdAt);
+  const until = turn.endedAt ? Date.parse(turn.endedAt) : now;
+  const seconds = Math.max(0, Math.floor((until - from) / 1_000));
+  const elapsed = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  const percent = active ? (progress?.percent ?? null) : null;
+  const updateAge = progress
+    ? Math.max(0, Math.floor((now - Date.parse(progress.updated_at)) / 1_000))
+    : null;
+
+  return (
+    <section
+      aria-label="Run progress"
+      className="grid gap-3 rounded-lg border border-(--line) bg-(--bg-subtle) p-3"
+    >
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <p className="text-sm font-medium text-(--ink)" aria-live="polite">
+          {title}
+        </p>
+        {Number.isFinite(seconds) ? (
+          <span className="font-mono text-xs text-(--mut)">{elapsed}</span>
+        ) : null}
+      </div>
+      {detail ? <p className="text-xs text-(--mut)">{detail}</p> : null}
+      {active ? (
+        <div className="flex items-center gap-2">
+          <progress
+            aria-label={percent === null ? title : `${title}: ${progress?.detail}`}
+            className="h-2 w-full accent-(--info)"
+            max={100}
+            value={percent ?? undefined}
+          />
+          {percent !== null ? (
+            <span className="font-mono text-xs text-(--ink)">{percent}%</span>
+          ) : null}
+        </div>
+      ) : null}
+      {progress ? (
+        <p className="text-xs text-(--mut)">
+          Last update{" "}
+          <time dateTime={progress.updated_at} title={formatTime(progress.updated_at)}>
+            {active && updateAge !== null && Number.isFinite(updateAge)
+              ? updateAge < 60
+                ? `${updateAge}s ago`
+                : `${Math.floor(updateAge / 60)}m ago`
+              : formatTime(progress.updated_at)}
+          </time>
+        </p>
+      ) : null}
+      {phaseIndex >= 0 || done ? (
+        <ol className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+          {RUN_PHASES.map((phase, index) => {
+            const status =
+              done || index < phaseIndex
+                ? "Complete"
+                : index === phaseIndex
+                  ? active
+                    ? "In progress"
+                    : "Stopped"
+                  : "Pending";
+            return (
+              <li
+                key={phase.id}
+                aria-current={status === "In progress" ? "step" : undefined}
+                className={status === "In progress" ? "font-medium text-(--ink)" : "text-(--mut)"}
+              >
+                <span aria-hidden="true" className="mr-1">
+                  {status === "Complete"
+                    ? "✓"
+                    : status === "Stopped"
+                      ? "!"
+                      : status === "In progress"
+                        ? "▶"
+                        : "○"}
+                </span>
+                <span className="sr-only">{status}: </span>
+                {phase.label}
+              </li>
+            );
+          })}
+        </ol>
+      ) : null}
+    </section>
   );
 }
 

@@ -87,7 +87,7 @@ export const PlanRepositorySchema = z.object({ repositoryId: z.string(), reposit
 export const PlanAgentSchema = z.object({
   name: z.string(),
   manifestHash: z.string(),
-  engine: z.enum(["claude_code", "codex"]),
+  engine: z.enum(["claude_code", "codex", "hermes"]),
   model: z.string(),
   repositoryId: z.string(),
   catalogCommitSha: z.string(),

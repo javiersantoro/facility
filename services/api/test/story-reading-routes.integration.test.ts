@@ -611,6 +611,158 @@ describe("story reading routes", async () => {
     expect(missing.statusCode).toBe(404);
   });
 
+  it("returns live progress independently of the activity cursor", async () => {
+    const url = `${base()}/turns/${turnIds[0]}/activity?after=6`;
+    const updatedAt = new Date("2026-09-10T11:00:00Z");
+    await db
+      .insert(turnEvents)
+      .values(
+        turnEvent(
+          turnIds[0],
+          7,
+          "turn.environment_progress",
+          { step: "Cloning app", detail: "Receiving objects", percent: 42 },
+          updatedAt,
+        ),
+      );
+    try {
+      const response = await app.inject({ url, headers: viewer() });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        items: [],
+        progress: {
+          phase: "environment",
+          title: "Cloning app",
+          percent: 42,
+          updated_at: updatedAt.toISOString(),
+        },
+      });
+    } finally {
+      await db
+        .delete(turnEvents)
+        .where(and(eq(turnEvents.turnId, turnIds[0] ?? ""), eq(turnEvents.seq, 7)));
+    }
+  });
+
+  it("returns live Hermes tool and reply status independently of new history", async () => {
+    const turnId = turnIds[0] ?? "";
+    const url = `${base()}/turns/${turnId}/activity`;
+    const startedAt = new Date("2026-09-10T11:00:00Z");
+    const liveAt = new Date("2026-09-10T11:00:05Z");
+    const scope = eq(turns.id, turnId);
+    await db.update(turns).set({ engine: "hermes" }).where(scope);
+    try {
+      await db
+        .insert(turnEvents)
+        .values([
+          turnEvent(turnId, 7, "turn.phase", { phase: "agent" }, startedAt),
+          turnEvent(
+            turnId,
+            8,
+            "engine.tool_use",
+            { name: "read_file", input: { path: "private.txt" } },
+            liveAt,
+          ),
+        ]);
+      const tool = await app.inject({ url: `${url}?after=7`, headers: viewer() });
+      expect(tool.statusCode).toBe(200);
+      expect(tool.json()).toMatchObject({
+        items: [{ kind: "tool", title: "Tool started: read file" }],
+        progress: {
+          phase: "agent",
+          title: "Tool started: read file",
+          started_at: startedAt.toISOString(),
+        },
+      });
+      expect(tool.body).not.toContain("private.txt");
+      await db
+        .insert(turnEvents)
+        .values(turnEvent(turnId, 9, "engine.text", { text: "private text fragment" }, liveAt));
+      const reply = await app.inject({ url: `${url}?after=8`, headers: viewer() });
+      expect(reply.statusCode).toBe(200);
+      expect(reply.json()).toMatchObject({
+        items: [],
+        progress: { title: "Generating a reply", percent: null, updated_at: liveAt.toISOString() },
+      });
+      expect(reply.body).not.toContain("private text fragment");
+    } finally {
+      await db.delete(turnEvents).where(and(eq(turnEvents.turnId, turnId), gt(turnEvents.seq, 6)));
+      await db.update(turns).set({ engine: "codex" }).where(scope);
+    }
+  });
+
+  it.each([
+    ["claude_code", "engine.reply_started", {}, "Generating a reply"],
+    ["codex", "engine.item.updated", { item: { type: "agent_message" } }, "Generating a reply"],
+  ] as const)("returns live %s status alongside existing run history", async (engine, type, data, title) => {
+    const turnId = turnIds[0] ?? "";
+    const url = `${base()}/turns/${turnId}/activity`;
+    const startedAt = new Date("2026-09-10T11:00:00Z");
+    const liveAt = new Date("2026-09-10T11:00:05Z");
+    const scope = eq(turns.id, turnId);
+    await db.update(turns).set({ engine }).where(scope);
+    try {
+      await db
+        .insert(turnEvents)
+        .values([
+          turnEvent(turnId, 7, "turn.phase", { phase: "agent" }, startedAt),
+          turnEvent(turnId, 8, type, data, liveAt),
+        ]);
+      const response = await app.inject({ url: `${url}?after=7`, headers: viewer() });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        progress: {
+          phase: "agent",
+          title,
+          started_at: startedAt.toISOString(),
+          updated_at: liveAt.toISOString(),
+          percent: null,
+        },
+      });
+    } finally {
+      await db.delete(turnEvents).where(and(eq(turnEvents.turnId, turnId), gt(turnEvents.seq, 6)));
+      await db.update(turns).set({ engine: "codex" }).where(scope);
+    }
+  });
+
+  it("returns readable reply snapshots through the scoped activity cursor", async () => {
+    const turnId = turnIds[0] ?? "";
+    const url = `${base()}/turns/${turnId}/activity`;
+    const timestamp = new Date("2026-09-10T11:00:00Z");
+    const reply = "Repository review. ".repeat(220);
+    await db
+      .insert(turnEvents)
+      .values([
+        turnEvent(
+          turnId,
+          7,
+          "engine.reply_text",
+          { stream_id: "reply", text: "Repository", complete: false },
+          timestamp,
+        ),
+        turnEvent(
+          turnId,
+          8,
+          "engine.reply_text",
+          { stream_id: "reply", text: reply, complete: true },
+          timestamp,
+        ),
+      ]);
+    try {
+      const response = await app.inject({ url: `${url}?after=6`, headers: viewer() });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        order: "asc",
+        items: [
+          { kind: "message", stream_id: "reply", text: "Repository" },
+          { kind: "message", stream_id: "reply", transcript_text: reply },
+        ],
+      });
+    } finally {
+      await db.delete(turnEvents).where(and(eq(turnEvents.turnId, turnId), gt(turnEvents.seq, 6)));
+    }
+  });
+
   it("reads new activity in ascending pages without losing a burst or confusing old cursors", async () => {
     const url = `${base()}/turns/${turnIds[0]}/activity`;
     const first = await app.inject({ url: `${url}?after=0&limit=2`, headers: viewer() });

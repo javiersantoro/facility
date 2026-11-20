@@ -25,7 +25,14 @@ import {
 } from "@facility/db";
 import { and, asc, desc, eq, gt, inArray, isNull, lt, lte, notInArray, sql } from "drizzle-orm";
 import { CostBudgetService, releaseOpenTurnReservation } from "../insights/costs.js";
-import { ACTIVITY_NOISE_TYPES, PROGRESS_NOISE_TYPES, presentTurnEvent } from "../turns/activity.js";
+import {
+  ACTIVITY_NOISE_TYPES,
+  agentProgressTypes,
+  PROGRESS_NOISE_TYPES,
+  presentRunProgress,
+  presentTurnEvent,
+  RUN_PROGRESS_TYPES,
+} from "../turns/activity.js";
 import { stopInterruptedEngineProcess } from "../turns/engines.js";
 import { appendTurnEvent } from "../turns/events.js";
 import { readUsageJournal } from "../turns/usage-journal.js";
@@ -1668,8 +1675,37 @@ export class StoryWorkspaceService {
       .limit(limit + 1);
     const hasMore = rows.length > limit;
     const items = rows.slice(0, limit).map(presentTurnEvent);
+    const progressScope = and(
+      eq(turnEvents.orgId, orgId),
+      eq(turnEvents.projectId, projectId),
+      eq(turnEvents.storyId, storyId),
+      eq(turnEvents.turnId, turnId),
+    );
+    const agentTypes = agentProgressTypes(turn.engine);
+    const [progress] = await this.db
+      .select()
+      .from(turnEvents)
+      .where(and(progressScope, inArray(turnEvents.type, [...RUN_PROGRESS_TYPES, ...agentTypes])))
+      .orderBy(desc(turnEvents.seq))
+      .limit(1);
+    const [agentPhase] =
+      progress && agentTypes.includes(progress.type)
+        ? await this.db
+            .select({ startedAt: turnEvents.createdAt })
+            .from(turnEvents)
+            .where(
+              and(
+                progressScope,
+                eq(turnEvents.type, "turn.phase"),
+                lt(turnEvents.seq, progress.seq),
+              ),
+            )
+            .orderBy(desc(turnEvents.seq))
+            .limit(1)
+        : [];
     return {
       turn: conversationTurn(turn),
+      progress: progress ? presentRunProgress(progress, agentPhase?.startedAt) : null,
       order: options.after === undefined ? ("desc" as const) : ("asc" as const),
       items,
       hasMore,

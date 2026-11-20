@@ -54,6 +54,36 @@ async function run(engine: string, events: unknown[], loseObserver = false) {
 }
 
 describe("durable per-turn usage", () => {
+  it("captures terminal Hermes counters even after the observer disconnects", async () => {
+    const raw = await run(
+      "hermes",
+      [
+        {
+          type: "result",
+          exit_code: 0,
+          session_id: "private-session",
+          text: "private-output",
+          tokens: { input: 100, output: 20, cache_read: 3, cache_write: 2 },
+        },
+      ],
+      true,
+    );
+    expect(parseUsageJournal(raw, "turn_test", "hermes")).toEqual({ complete: true, usage });
+    expect(raw).not.toContain("private-output");
+    expect(raw).not.toContain("private-session");
+  });
+
+  it("treats Hermes's default zero counters as missing usage", async () => {
+    const raw = await run("hermes", [
+      {
+        type: "result",
+        exit_code: 1,
+        tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+      },
+    ]);
+    expect(parseUsageJournal(raw, "turn_test", "hermes")).toEqual({ complete: false });
+  });
+
   it.each([
     false,
     true,

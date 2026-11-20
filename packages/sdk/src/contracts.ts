@@ -188,7 +188,7 @@ export type KickstartAnswers = NonNullable<
 export type StoryAgent = {
   name: string;
   description: string;
-  engine: "claude_code" | "codex";
+  engine: "claude_code" | "codex" | "hermes";
   model: string;
   enabled: boolean;
   options: {
@@ -490,9 +490,20 @@ export type StoryActivityItem = {
   truncated: boolean;
   size_bytes: number;
   created_at: string;
+  stream_id?: string;
+  transcript_text?: string;
+  transcript_excerpt?: boolean;
 };
 export type StoryTurnActivityPage = {
   turn: StoryTurnSummary;
+  progress?: {
+    phase: string;
+    title: string;
+    detail: string;
+    percent: number | null;
+    started_at: string;
+    updated_at: string;
+  } | null;
   /** Incremental `after` pages are ascending; older servers omit this field. */
   order?: "asc" | "desc";
   items: StoryActivityItem[];

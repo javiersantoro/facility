@@ -10,7 +10,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const turnId = process.env.FACILITY_TURN_ID;
 const engine = process.env.FACILITY_ENGINE;
-if (!/^turn_[A-Za-z0-9_-]+$/.test(turnId) || !['codex', 'claude_code'].includes(engine)) process.exit(64);
+if (!/^turn_[A-Za-z0-9_-]+$/.test(turnId) || !['codex', 'claude_code', 'hermes'].includes(engine)) process.exit(64);
 const dir = path.join(path.dirname(process.env.HOME), 'engine-usage');
 fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 const file = path.join(dir, turnId + '.json');
@@ -47,8 +47,15 @@ function accept(line) {
       save();
     }
   }
-  if ((engine === 'claude_code' && event.type === 'result') || (engine === 'codex' && event.type === 'turn.completed')) {
-    const measured = counters(event.usage);
+  if ((engine === 'claude_code' && event.type === 'result') || (engine === 'codex' && event.type === 'turn.completed')
+    || (engine === 'hermes' && event.type === 'result')) {
+    const tokens = event.tokens;
+    const measured = engine === 'hermes'
+      ? tokens && (tokens.input > 0 || tokens.output > 0) && counters({
+          input_tokens: tokens.input, output_tokens: tokens.output,
+          cache_read_input_tokens: tokens.cache_read, cache_creation_input_tokens: tokens.cache_write
+        })
+      : counters(event.usage);
     if (measured) {
       usage = measured;
       if (engine === 'claude_code' && Number.isFinite(event.total_cost_usd) && event.total_cost_usd >= 0)

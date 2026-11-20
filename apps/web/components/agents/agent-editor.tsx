@@ -47,7 +47,7 @@ export function AgentEditor({ projectId, agent }: { projectId: string; agent: St
         description,
         engine,
         model,
-        reasoning_effort: reasoningEffort || null,
+        reasoning_effort: engine === "hermes" ? null : reasoningEffort || null,
         enabled,
         triggers: parsedTriggers,
         prompt,
@@ -83,6 +83,7 @@ export function AgentEditor({ projectId, agent }: { projectId: string; agent: St
             >
               <option value="claude_code">Claude Code</option>
               <option value="codex">Codex</option>
+              <option value="hermes">Hermes Agent</option>
             </Select>
           </Field>
           <Field label="Model">
@@ -96,10 +97,15 @@ export function AgentEditor({ projectId, agent }: { projectId: string; agent: St
         </div>
         <Field
           label="Reasoning effort"
-          hint="The only engine-specific execution option in Facility 0.12."
+          hint={
+            engine === "hermes"
+              ? "Hermes uses the model provider default."
+              : "The only engine-specific execution option in Facility 0.12."
+          }
         >
           <Select
-            value={reasoningEffort}
+            value={engine === "hermes" ? "" : reasoningEffort}
+            disabled={engine === "hermes"}
             onChange={(event) => setReasoningEffort(event.target.value)}
           >
             {reasoningEfforts.map((effort) => (

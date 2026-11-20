@@ -13342,7 +13342,8 @@
                                 "type": "string",
                                 "enum": [
                                   "claude_code",
-                                  "codex"
+                                  "codex",
+                                  "hermes"
                                 ]
                               },
                               "model": {
@@ -13567,7 +13568,8 @@
                                       "type": "string",
                                       "enum": [
                                         "claude_code",
-                                        "codex"
+                                        "codex",
+                                        "hermes"
                                       ]
                                     },
                                     "model": {
@@ -14502,7 +14504,8 @@
                                 "type": "string",
                                 "enum": [
                                   "claude_code",
-                                  "codex"
+                                  "codex",
+                                  "hermes"
                                 ]
                               },
                               "model": {
@@ -14727,7 +14730,8 @@
                                       "type": "string",
                                       "enum": [
                                         "claude_code",
-                                        "codex"
+                                        "codex",
+                                        "hermes"
                                       ]
                                     },
                                     "model": {
@@ -15550,7 +15554,8 @@
                             "type": "string",
                             "enum": [
                               "claude_code",
-                              "codex"
+                              "codex",
+                              "hermes"
                             ]
                           },
                           "model": {
@@ -16551,7 +16556,8 @@
                                 "type": "string",
                                 "enum": [
                                   "claude_code",
-                                  "codex"
+                                  "codex",
+                                  "hermes"
                                 ]
                               },
                               "model": {
@@ -17342,7 +17348,8 @@
                                 "type": "string",
                                 "enum": [
                                   "claude_code",
-                                  "codex"
+                                  "codex",
+                                  "hermes"
                                 ]
                               },
                               "model": {
@@ -17567,7 +17574,8 @@
                                       "type": "string",
                                       "enum": [
                                         "claude_code",
-                                        "codex"
+                                        "codex",
+                                        "hermes"
                                       ]
                                     },
                                     "model": {
@@ -21956,7 +21964,8 @@
                             "type": "string",
                             "enum": [
                               "claude_code",
-                              "codex"
+                              "codex",
+                              "hermes"
                             ]
                           },
                           "model": {
@@ -31910,7 +31919,8 @@
                     "type": "string",
                     "enum": [
                       "claude_code",
-                      "codex"
+                      "codex",
+                      "hermes"
                     ]
                   },
                   "model": {

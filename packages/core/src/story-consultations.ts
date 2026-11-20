@@ -160,7 +160,7 @@ export const ConsultationOptionsSchema = z.object({
   agents: z.array(
     z.object({
       name: z.string(),
-      engine: z.enum(["claude_code", "codex"]),
+      engine: z.enum(["claude_code", "codex", "hermes"]),
       model: z.string(),
       reasoningEffort: z.string().nullable(),
       manifestHash: z.string(),

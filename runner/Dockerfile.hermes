@@ -1,0 +1,23 @@
+# syntax=docker/dockerfile:1
+ARG FACILITY_RUNNER_IMAGE=facility-runner:dev
+FROM ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff AS uv
+FROM ${FACILITY_RUNNER_IMAGE}
+USER root
+
+ARG HERMES_COMMIT=ae2a81ccc00e9b7c06301523e5bb09608397149c
+
+# Hermes's locked dependencies require Python 3.14 and its source must be installed editable.
+RUN --mount=type=bind,from=uv,source=/uv,target=/usr/local/bin/uv \
+  export UV_PYTHON_INSTALL_DIR=/opt/facility-hermes/python UV_NO_CACHE=1 \
+  && git init -q /opt/facility-hermes/source \
+  && git -C /opt/facility-hermes/source fetch --depth=1 \
+    https://github.com/NousResearch/hermes-agent.git "${HERMES_COMMIT}" \
+  && git -C /opt/facility-hermes/source checkout --detach FETCH_HEAD \
+  && test "$(git -C /opt/facility-hermes/source rev-parse HEAD)" = "${HERMES_COMMIT}" \
+  && uv sync --project /opt/facility-hermes/source --frozen --no-dev --python 3.14.9 --managed-python \
+  && ln -s /opt/facility-hermes/source/.venv/bin/hermes /usr/local/bin/hermes
+
+USER node
+RUN check_home="$(mktemp -d)" \
+  && HERMES_HOME="$check_home" hermes chat --help > /dev/null \
+  && rm -rf "$check_home"

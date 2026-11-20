@@ -57,7 +57,7 @@ const ReasoningEffort = z.enum([
 const UpdateAgentBody = z.object({
   expected_commit_sha: z.string().regex(/^[a-f0-9]{40}$/),
   description: z.string().min(1).max(240),
-  engine: z.enum(["claude_code", "codex"]),
+  engine: z.enum(["claude_code", "codex", "hermes"]),
   model: z.string().min(1).max(160),
   reasoning_effort: ReasoningEffort.nullable().optional(),
   enabled: z.boolean(),
@@ -823,6 +823,7 @@ export async function registerStoryWorkspaceRoutes(app: FastifyInstance, config:
       return {
         turn: page.turn,
         order: page.order,
+        progress: page.progress,
         items: page.items,
         has_more: page.hasMore,
         next_cursor: page.nextCursor,

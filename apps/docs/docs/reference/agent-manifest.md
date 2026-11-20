@@ -48,7 +48,7 @@ hashed with SHA-256. A turn stores that hash, the source commit, engine, model, 
 | --- | --- | --- |
 | `name` | Yes | Lowercase kebab case, 1–64 characters, and identical to the filename without `.md`. |
 | `description` | Yes | 1–240 characters for human and client discovery. |
-| `engine` | Yes | `claude_code` or `codex`. |
+| `engine` | Yes | `claude_code`, `codex`, or `hermes`. |
 | `model` | Yes | Explicit engine model name, 1–160 characters. |
 | `options` | No | Strict engine options object; defaults to `{}`. |
 | `enabled` | No | Boolean; defaults to `true`. |
@@ -166,3 +166,60 @@ rather than writing the default branch.
 
 A queued or running turn keeps its manifest snapshot. Later catalog commits affect later turns and
 do not alter previous execution history.
+
+## Hermes with LM Studio
+
+Build the optional runner on top of your existing local runner:
+
+```powershell
+docker build -f runner/Dockerfile.hermes -t facility-runner:hermes .
+```
+
+In the project's `.facility.yml`, merge these names into the existing environment settings.
+Keep the current `start` command if you already have one.
+
+```yaml
+environment:
+  start: "true"
+  image: facility-runner:hermes
+  variables:
+    - HERMES_LM_STUDIO_URL
+  secrets:
+    - HERMES_LM_STUDIO_TOKEN
+```
+
+Set the values in Facility's local `.env`, substituting the actual uppercased project ID. Omit
+`HERMES_LM_STUDIO_TOKEN` from both places if LM Studio requires no authentication. The URL must end
+in `/v1`; Docker Desktop uses `host.docker.internal` to reach LM Studio on the host.
+
+```dotenv
+FACILITY_PROJECT_PROJ_ABC_HERMES_LM_STUDIO_URL=http://host.docker.internal:1234/v1
+FACILITY_PROJECT_PROJ_ABC_HERMES_LM_STUDIO_TOKEN=your-local-token
+```
+
+Add `.agents/hermes.md` to the project's repository and use the identifier shown by LM Studio:
+
+```markdown
+---
+name: hermes
+description: Runs interactive coding tasks against local LM Studio.
+engine: hermes
+model: qwen/qwen3-coder-next
+triggers:
+  - type: ui
+---
+Follow the user's request and report the result. For inspection requests, leave the repository
+unchanged. Publish changes only when requested.
+```
+
+Restart the Facility API and worker after changing `.env`, allow migrations to run, and select
+Hermes in a new story so the workspace uses the Hermes runner image. Give the story an explicit
+title for a local inference smoke test. Send a short request that asks for a unique response
+without tools and confirm a Chat Completions request in LM Studio. Then send a follow-up to test
+session resume.
+
+Hermes uses the model provider's default reasoning configuration. This integration runs Hermes as a
+normal workspace agent. Facility rejects Hermes turns that
+require enforced read-only review or a provider spending limit. The Hermes provider is restricted
+to the local LM Studio endpoint, and models absent from Facility's pricing catalogue are not
+eligible for budget-enforced dispatch.

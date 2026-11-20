@@ -7,6 +7,7 @@ import { newId } from "@facility/core";
 import {
   attentionItems,
   createDb,
+  engineSessions,
   githubInstallations,
   migrate,
   orgs,
@@ -1054,5 +1055,45 @@ environment:
         actor: { type: "user", id: "other" },
       }),
     ).rejects.toMatchObject({ code: "story_not_found", statusCode: 404 });
+  });
+
+  it("persists Hermes manifests and native sessions for new story turns", async () => {
+    const agent = parseAgentManifest(
+      `---
+name: hermes
+description: Runs a local model.
+engine: hermes
+model: qwen/qwen3-coder-next
+triggers:
+  - type: manual
+---
+Report the result.
+`,
+      ".agents/hermes.md",
+    );
+    const started = await service.start({
+      ...startInput(`hermes-${suffix}`),
+      agent,
+      workspace: { image: "facility-runner:hermes", ports: [] },
+    });
+    expect(started.queued.turn).toMatchObject({ engine: "hermes", model: agent.model });
+    if (!started.workspace || !started.queued.turn) throw new Error("Incomplete story fixture");
+    const [session] = await db
+      .insert(engineSessions)
+      .values({
+        id: newId("esess"),
+        orgId,
+        projectId,
+        storyId: started.story.id,
+        workspaceId: started.workspace.id,
+        agentName: agent.name,
+        engine: agent.engine,
+        model: agent.model,
+        nativeSessionId: "20261118_160937_abc123",
+        statePath: "/workspace/.facility/hermes",
+        lastTurnId: started.queued.turn.id,
+      })
+      .returning();
+    expect(session).toMatchObject({ engine: "hermes", nativeSessionId: "20261118_160937_abc123" });
   });
 });

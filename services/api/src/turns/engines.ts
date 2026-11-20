@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { AgentManifest } from "@facility/agents";
 import type {
   WorkspaceCommandResult,
@@ -24,7 +25,7 @@ export type AgentTurnRequest = {
 };
 
 export type AgentTurnEvent = {
-  engine: "claude_code" | "codex";
+  engine: AgentManifest["engine"];
   type: string;
   data: Record<string, unknown>;
 };
@@ -53,7 +54,7 @@ export type AgentTurnUsage = {
 };
 
 export interface AgentEngine {
-  readonly name: "claude_code" | "codex";
+  readonly name: AgentManifest["engine"];
   run(request: AgentTurnRequest): Promise<AgentTurnResult>;
 }
 
@@ -69,10 +70,18 @@ export class AgentEngineError extends Error {
 }
 
 abstract class CliAgentEngine implements AgentEngine {
-  abstract readonly name: "claude_code" | "codex";
+  abstract readonly name: AgentManifest["engine"];
   abstract run(request: AgentTurnRequest): Promise<AgentTurnResult>;
 
   constructor(protected readonly runtime: WorkspaceRuntime) {}
+
+  protected resultError(_events: AgentTurnEvent[]): string | undefined {
+    return undefined;
+  }
+
+  protected processError(result: WorkspaceCommandResult): string {
+    return result.stderr.trim() || `${this.name} exited with status ${result.exitCode}`;
+  }
 
   protected async execute(
     request: AgentTurnRequest,
@@ -130,7 +139,7 @@ abstract class CliAgentEngine implements AgentEngine {
     parser.finish(result.stdout);
     const parsed = parser.result();
     if (result.exitCode !== 0) {
-      const message = result.stderr.trim() || `${this.name} exited with status ${result.exitCode}`;
+      const message = this.resultError(parsed.events) || this.processError(result);
       const corruptSession =
         request.nativeSessionId &&
         /(?:session|thread).*(?:corrupt|invalid|not found|missing|unreadable|cannot resume)/i.test(
@@ -224,6 +233,7 @@ export class ClaudeCodeEngine extends CliAgentEngine {
       "--output-format",
       "stream-json",
       "--verbose",
+      "--include-partial-messages",
       ...(request.readOnly
         ? [
             "--permission-mode",
@@ -276,6 +286,92 @@ export class CodexEngine extends CliAgentEngine {
       environment.CODEX_API_KEY = environment.OPENAI_API_KEY;
     }
     return this.execute({ ...request, environment }, "codex", args, new CodexEventParser());
+  }
+}
+
+export class HermesEngine extends CliAgentEngine {
+  readonly name = "hermes" as const;
+
+  protected override resultError(events: AgentTurnEvent[]): string | undefined {
+    const result = events.findLast((event) => event.type === "result");
+    return stringValue(result?.data.error)?.trim() || undefined;
+  }
+
+  protected override processError(result: WorkspaceCommandResult): string {
+    const diagnostic = result.stderr
+      .split(/\r?\n/)
+      .filter((line) => !/^\s*session(?:_id)?:\s*\S+\s*$/i.test(line))
+      .join("\n")
+      .trim();
+    return diagnostic
+      ? `Hermes exited with status ${result.exitCode}. ${diagnostic}`
+      : `Hermes exited with status ${result.exitCode}. The CLI did not provide an error message. Check Hermes logs in the story workspace.`;
+  }
+
+  async run(request: AgentTurnRequest): Promise<AgentTurnResult> {
+    if (request.readOnly) {
+      throw new AgentEngineError(
+        "agent_read_only_unsupported",
+        "Hermes cannot enforce Facility's read-only tool policy.",
+      );
+    }
+    if (request.maxBudgetUsd !== undefined) {
+      throw new AgentEngineError(
+        "agent_budget_unsupported",
+        "Hermes currently supports local inference without a provider spending limit.",
+      );
+    }
+    const baseUrl = request.environment?.HERMES_LM_STUDIO_URL;
+    if (
+      !baseUrl ||
+      !URL.canParse(baseUrl) ||
+      !/^http:\/\/(?:host\.docker\.internal|127\.0\.0\.1|localhost):[0-9]{1,5}\/v1\/?$/.test(
+        baseUrl,
+      )
+    ) {
+      throw new AgentEngineError(
+        "agent_provider_invalid",
+        "Set HERMES_LM_STUDIO_URL to a local LM Studio HTTP endpoint ending in /v1.",
+      );
+    }
+    const environment = {
+      ...request.environment,
+      HERMES_HOME: "/workspace/.facility/hermes",
+      OPENAI_BASE_URL: baseUrl,
+      OPENAI_API_KEY: request.environment?.HERMES_LM_STUDIO_TOKEN || "lmstudio",
+      // LM Studio can emit an initial event before it finishes processing a large prompt.
+      HERMES_CODEX_EVENT_STALE_TIMEOUT_SECONDS:
+        request.environment?.HERMES_CODEX_EVENT_STALE_TIMEOUT_SECONDS || "180",
+    };
+    const args = [
+      ...(request.nativeSessionId ? ["--resume", request.nativeSessionId] : []),
+      "chat",
+      "--provider",
+      "openai-api",
+      "--format",
+      "stream-json",
+      "--model",
+      request.manifest.model,
+      `--query=${request.prompt}`,
+    ];
+    const result = await this.execute(
+      { ...request, environment },
+      "hermes",
+      args,
+      new HermesEventParser(),
+    );
+    const final = result.events.findLast((event) => event.type === "result");
+    if (!final) {
+      throw new AgentEngineError("agent_output_invalid", "Hermes exited without a result event.");
+    }
+    if (final.data.exit_code !== 0) {
+      throw new AgentEngineError(
+        "agent_engine_failed",
+        this.resultError(result.events) ?? "Hermes reported an unsuccessful turn.",
+        { engine: this.name, events: result.events, usage: result.usage },
+      );
+    }
+    return result;
   }
 }
 
@@ -341,6 +437,13 @@ type ParsedEngineEvents = {
 abstract class EngineEventParser {
   private buffer = "";
   protected readonly events: AgentTurnEvent[] = [];
+  private reply?: {
+    engine: AgentTurnEvent["engine"];
+    id: string;
+    text: string;
+    publishedAt: number;
+    truncated: boolean;
+  };
   onEvent?: (event: AgentTurnEvent) => void;
 
   record(event: AgentTurnEvent) {
@@ -356,9 +459,51 @@ abstract class EngineEventParser {
   }
 
   finish(fallbackStdout = "") {
-    if (this.events.length === 0 && !this.buffer && fallbackStdout) this.buffer = fallbackStdout;
+    if (this.events.length === 0 && !this.buffer && fallbackStdout) this.push(fallbackStdout);
     if (this.buffer.trim()) this.parseLine(this.buffer);
     this.buffer = "";
+    const before = this.events.length;
+    this.closeReply();
+    for (const event of this.events.slice(before)) this.onEvent?.(event);
+  }
+
+  protected appendReply(engine: AgentTurnEvent["engine"], delta: string) {
+    this.reply ??= {
+      engine,
+      id: randomUUID(),
+      text: "",
+      publishedAt: -Infinity,
+      truncated: false,
+    };
+    const reply = this.reply;
+    const remaining = 24_000 - reply.text.length;
+    if (remaining <= 0) {
+      reply.truncated = true;
+      return;
+    }
+    reply.text += delta.slice(0, remaining);
+    reply.truncated ||= delta.length > remaining;
+    const now = Date.now();
+    if (now - reply.publishedAt >= 750) {
+      this.publishReply(reply, false);
+      reply.publishedAt = now;
+    }
+  }
+
+  protected closeReply() {
+    const reply = this.reply;
+    if (!reply) return undefined;
+    this.publishReply(reply, true);
+    this.reply = undefined;
+    return reply;
+  }
+
+  private publishReply(reply: NonNullable<EngineEventParser["reply"]>, complete: boolean) {
+    this.events.push({
+      engine: reply.engine,
+      type: "reply_text",
+      data: { stream_id: reply.id, text: reply.text, complete, excerpt: reply.truncated },
+    });
   }
 
   private parseLine(line: string) {
@@ -399,7 +544,27 @@ export class ClaudeEventParser extends EngineEventParser {
 
   protected accept(value: Record<string, unknown>) {
     const type = stringValue(value.type) ?? "unknown";
-    this.events.push({ engine: "claude_code", type, data: value });
+    if (type === "stream_event") {
+      const stream = objectValue(value.event);
+      if (stream?.type === "message_start") this.closeReply();
+      const delta = objectValue(stream?.delta);
+      if (
+        stream?.type === "content_block_delta" &&
+        delta?.type === "text_delta" &&
+        typeof delta.text === "string"
+      ) {
+        this.appendReply("claude_code", delta.text);
+      }
+      return;
+    }
+    const reply = type === "assistant" || type === "result" ? this.closeReply() : undefined;
+    const sameReply =
+      reply && (type === "assistant" || stringValue(value.result)?.startsWith(reply.text));
+    this.events.push({
+      engine: "claude_code",
+      type,
+      data: sameReply ? { ...value, stream_id: reply.id } : value,
+    });
     this.sessionId ??= stringValue(value.session_id);
     if (type === "system") this.model ??= stringValue(value.model);
     if (type === "result") {
@@ -460,6 +625,57 @@ export class CodexEventParser extends EngineEventParser {
       sessionId: this.sessionId,
       output,
       progress,
+      events: this.events,
+      usage: this.usage,
+    };
+  }
+}
+
+export class HermesEventParser extends EngineEventParser {
+  private sessionId?: string;
+  private model?: string;
+  private output = "";
+  private usage?: AgentTurnUsage;
+
+  protected accept(value: Record<string, unknown>) {
+    const type = stringValue(value.type);
+    if (!type) return;
+    if (type === "text") {
+      if (typeof value.text === "string") this.appendReply("hermes", value.text);
+      return;
+    }
+    const reply = this.closeReply();
+    const sessionId = stringValue(value.session_id);
+    if (sessionId && (type === "system" || type === "result")) this.sessionId = sessionId;
+    if (type === "system" && value.subtype === "init") this.model = stringValue(value.model);
+    if (type === "result") {
+      this.output = stringValue(value.text) ?? "";
+      const tokens = objectValue(value.tokens);
+      if (tokens && (Number(tokens.input) > 0 || Number(tokens.output) > 0)) {
+        this.usage = usageValue({
+          input_tokens: tokens.input,
+          output_tokens: tokens.output,
+          cache_read_input_tokens: tokens.cache_read,
+          cache_creation_input_tokens: tokens.cache_write,
+        });
+      }
+    }
+    this.events.push({
+      engine: "hermes",
+      type,
+      data:
+        type === "result" && reply && stringValue(value.text)?.startsWith(reply.text)
+          ? { ...value, stream_id: reply.id }
+          : value,
+    });
+  }
+
+  result(): ParsedEngineEvents {
+    return {
+      sessionId: this.sessionId,
+      model: this.model,
+      output: this.output,
+      progress: [],
       events: this.events,
       usage: this.usage,
     };
@@ -552,7 +768,8 @@ export function nativeSessionFromEvent(event: AgentTurnEvent): string | undefine
   const value =
     event.engine === "codex" && event.type === "thread.started"
       ? event.data.thread_id
-      : event.engine === "claude_code"
+      : event.engine === "claude_code" ||
+          (event.engine === "hermes" && ["system", "result"].includes(event.type))
         ? event.data.session_id
         : undefined;
   return typeof value === "string" && /^[A-Za-z0-9_-]{1,200}$/.test(value) ? value : undefined;

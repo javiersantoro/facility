@@ -17,3 +17,29 @@ export function redactString(value: string, secrets: string[]) {
     .filter(Boolean)
     .reduce((current, secret) => current.replaceAll(secret, "[REDACTED]"), value);
 }
+
+/** Hold back a credential that may be split between streamed reply snapshots. */
+export function redactEngineActivity(
+  event: { type: string; data: Record<string, unknown> },
+  secrets: string[],
+) {
+  const data = redactEvent(event.data, secrets);
+  if (
+    event.type !== "reply_text" ||
+    typeof data.text !== "string" ||
+    (data.complete === true && data.excerpt !== true)
+  )
+    return data;
+
+  const value = data.text;
+  let held = 0;
+  for (const secret of secrets) {
+    for (let length = Math.min(secret.length - 1, value.length); length > held; length--) {
+      if (value.endsWith(secret.slice(0, length))) {
+        held = length;
+        break;
+      }
+    }
+  }
+  return { ...data, text: value.slice(0, value.length - held) };
+}

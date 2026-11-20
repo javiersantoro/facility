@@ -18,6 +18,7 @@ import { isPreviewBranch, PREVIEW_MANAGED_REF, previewBranchRefs } from "./previ
 import type {
   CreateWorkspace,
   PreviewEndpoint,
+  WorkspaceCommand,
   WorkspaceCommandResult,
   WorkspaceLocator,
   WorkspaceRuntime,
@@ -204,12 +205,38 @@ export class GithubProjectManifestSource implements ProjectManifestSource {
   }
 }
 
+export type EnvironmentProgress = {
+  step: string;
+  detail: string;
+  percent?: number;
+  startedAt?: string;
+};
+
+export function gitProgressReader() {
+  let buffer = "";
+  return (chunk: string): { detail: string; percent: number } | undefined => {
+    const lines = (buffer + chunk).split(/[\r\n]/);
+    buffer = lines.pop() ?? "";
+    if (buffer.length > 1_024) buffer = "";
+    // Git's local progress fields are safe; remote messages and raw stderr can expose secrets.
+    for (const line of lines.reverse()) {
+      const match = /^(Receiving objects|Resolving deltas|Updating files): +([0-9]{1,3})%/.exec(
+        line,
+      );
+      const detail = match?.[1];
+      const percent = Number(match?.[2]);
+      if (detail && percent <= 100) return { detail, percent };
+    }
+  };
+}
+
 type EnvironmentInput = {
   orgId: string;
   projectId: string;
   workspace: WorkspaceLocator;
   manifest: ProjectManifest;
   credentials: GithubWorkspaceCredentials;
+  onProgress?: (progress: EnvironmentProgress) => Promise<void>;
   readinessTimeoutMs?: number;
   signal?: AbortSignal;
 };
@@ -237,6 +264,10 @@ export class ProjectEnvironmentService {
       cleanSetup?: boolean;
     },
   ) {
+    await input.onProgress?.({
+      step: "Preparing repositories",
+      detail: "Resolving the project environment and checking repository checkouts.",
+    });
     assertRepositoryContract(input.manifest, input.credentials.repositories);
     const preparedInput = await this.withDeclaredEnvironment(input);
     await this.run(preparedInput, "mkdir -p repos", ".", "environment.repositories");
@@ -259,17 +290,30 @@ export class ProjectEnvironmentService {
         await this.runCommand(
           preparedInput,
           "git",
-          ["clone", `${this.gitBaseUrl}/${repository.owner}/${repository.name}.git`, cwd],
+          [
+            "clone",
+            "--progress",
+            `${this.gitBaseUrl}/${repository.owner}/${repository.name}.git`,
+            cwd,
+          ],
           ".",
           `clone ${repository.owner}/${repository.name}`,
+          {
+            step: `Cloning ${repository.name}`,
+            detail: "Downloading the repository and its Git history.",
+          },
         );
       }
       await this.runCommand(
         preparedInput,
         "git",
-        ["fetch", "--no-recurse-submodules", "--all", "--prune"],
+        ["fetch", "--progress", "--no-recurse-submodules", "--all", "--prune"],
         cwd,
         "git fetch",
+        {
+          step: `Fetching changes for ${repository.name}`,
+          detail: "Checking GitHub for new commits.",
+        },
       );
       await this.runCommand(
         preparedInput,
@@ -285,14 +329,26 @@ export class ProjectEnvironmentService {
         cwd,
         "git identity",
       );
+      await preparedInput.onProgress?.({
+        step: `Checking out ${repository.name}`,
+        detail: "Preparing the branch for this story.",
+      });
       if (repository.role === "primary") await this.ensureBranch(preparedInput, repository, cwd);
       else await this.leavePreviewBranch(preparedInput, repository, cwd);
     }
 
+    await preparedInput.onProgress?.({
+      step: "Checking setup",
+      detail: "Checking whether the project setup needs to run.",
+    });
     const setupChecksum = await this.setupChecksum(preparedInput);
     const setupRequired = input.cleanSetup || input.previousSetupChecksum !== setupChecksum;
     if (setupRequired) {
       if (preparedInput.manifest.environment.setup) {
+        await preparedInput.onProgress?.({
+          step: "Running project setup",
+          detail: "Running the setup command from the project configuration.",
+        });
         await this.run(
           preparedInput,
           preparedInput.manifest.environment.setup,
@@ -303,6 +359,10 @@ export class ProjectEnvironmentService {
           preparedInput.manifest.environment.seed &&
           (input.cleanSetup || !input.previousSetupChecksum)
         ) {
+          await preparedInput.onProgress?.({
+            step: "Seeding project data",
+            detail: "Running the seed command from the project configuration.",
+          });
           await this.run(
             preparedInput,
             preparedInput.manifest.environment.seed,
@@ -374,15 +434,29 @@ export class ProjectEnvironmentService {
     publish = true,
   ) {
     if (!alreadyReady) {
+      await preparedInput.onProgress?.({
+        step: "Starting project services",
+        detail: "Running the start command from the project configuration.",
+      });
       await this.run(
         preparedInput,
         preparedInput.manifest.environment.start,
         primaryPath(preparedInput.credentials),
         "environment.start",
       );
-      if (preparedInput.manifest.environment.ready) await this.waitUntilReady(preparedInput);
+      if (preparedInput.manifest.environment.ready) {
+        await preparedInput.onProgress?.({
+          step: "Waiting for project services",
+          detail: "Running the project’s readiness checks.",
+        });
+        await this.waitUntilReady(preparedInput);
+      }
     }
     preparedInput.signal?.throwIfAborted();
+    await preparedInput.onProgress?.({
+      step: "Connecting workspace services",
+      detail: "Registering any configured service endpoints.",
+    });
     const endpoints = await this.runtime.expose(
       preparedInput.workspace,
       services(preparedInput.manifest),
@@ -859,15 +933,44 @@ export class ProjectEnvironmentService {
     args: string[],
     cwd: string,
     phase: string,
+    progress?: EnvironmentProgress,
   ) {
-    const result = await this.runtime.exec(input.workspace, {
-      signal: input.signal,
-      command,
-      args,
-      cwd,
-      env: input.credentials.environment,
-      timeoutMs: 30 * 60 * 1_000,
-    });
+    const report = input.onProgress;
+    let onOutput: WorkspaceCommand["onOutput"];
+    let pending: Promise<void> | undefined;
+    if (progress && report) {
+      const startedAt = new Date().toISOString();
+      await report({ ...progress, startedAt });
+      const readProgress = gitProgressReader();
+      let lastDetail: string | undefined;
+      let lastReport = 0;
+      onOutput = ({ stream, data }) => {
+        if (stream !== "stderr") return;
+        const update = readProgress(data);
+        if (!update || pending) return;
+        const now = Date.now();
+        if (update.detail === lastDetail && now - lastReport < 2_000) return;
+        lastDetail = update.detail;
+        lastReport = now;
+        pending = report({ step: progress.step, ...update, startedAt }).finally(() => {
+          pending = undefined;
+        });
+      };
+    }
+
+    const result = await this.runtime
+      .exec(input.workspace, {
+        signal: input.signal,
+        command,
+        args,
+        cwd,
+        env: onOutput
+          ? { ...input.credentials.environment, LC_ALL: "C" }
+          : input.credentials.environment,
+        timeoutMs: 30 * 60 * 1_000,
+        ...(onOutput ? { onOutput } : {}),
+      })
+      .finally(() => pending);
     if (result.exitCode !== 0) {
       throw commandFailure(
         phase,

@@ -54,7 +54,7 @@ import { TurnHealthMonitor } from "./health-monitor.js";
 import { TurnLeaseHeartbeat } from "./lease-heartbeat.js";
 import { LiveTurnEvents } from "./live-events.js";
 import { buildPrompt } from "./prompt.js";
-import { redactEvent as redact, redactString } from "./redaction.js";
+import { redactEngineActivity, redactString } from "./redaction.js";
 import { readUsageJournal } from "./usage-journal.js";
 
 export class TurnDispatcher {
@@ -273,6 +273,16 @@ export class TurnDispatcher {
         credentials: { ...credential, environment: renewableEnvironment },
         branch,
         previousSetupChecksum: workspace.setupChecksum,
+        onProgress: async (progress) => {
+          await appendTurnEvent(this.db, {
+            ...eventBase,
+            type:
+              progress.percent === undefined
+                ? "turn.environment_step"
+                : "turn.environment_progress",
+            data: progress,
+          }).catch(() => undefined);
+        },
         ...(cycle ? { signal: cancellation.signal } : {}),
       });
       if (credentialRenewal) {
@@ -403,7 +413,7 @@ export class TurnDispatcher {
             await appendTurnEvent(tx, {
               ...eventBase,
               type: `engine.${event.type}`,
-              data: { ...boundedEvent(redact(event.data, secrets)), facilityEventIndex },
+              data: { ...boundedEvent(redactEngineActivity(event, secrets)), facilityEventIndex },
             });
           }
         });
@@ -1157,7 +1167,7 @@ export class TurnDispatcher {
         statePath:
           input.manifest.engine === "claude_code"
             ? "/workspace/.facility/claude"
-            : "/workspace/.facility/codex",
+            : `/workspace/.facility/${input.manifest.engine}`,
         lastTurnId: input.turnId,
       })
       .onConflictDoUpdate({
@@ -1185,7 +1195,7 @@ export class TurnDispatcher {
       await appendTurnEvent(this.db, {
         ...eventBase,
         type: `engine.${event.type}`,
-        data: boundedEvent(redact(event.data as Record<string, unknown>, secrets)),
+        data: boundedEvent(redactEngineActivity({ type: event.type, data: event.data }, secrets)),
       });
     }
   }

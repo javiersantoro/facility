@@ -14,6 +14,7 @@ import type { StoryTitleService } from "./stories/titles.js";
 import { createStoryDomain } from "./story-domain.js";
 import { configureTurnQueue } from "./turn-queue.js";
 import { ecsTaskProtection, WorkerTurnGuard } from "./worker-task-protection.js";
+import { pathToFileURL } from "node:url";
 
 const TURN_LEASE_TIMEOUT_MS = 2 * 60 * 1_000;
 
@@ -400,7 +401,7 @@ export async function recoverInterruptedTurns(
   return recovered;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     const boss = await startWorker();
     let closing = false;

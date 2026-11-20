@@ -11,7 +11,12 @@
 export const ACTIVITY_TEXT_LIMIT = 2_000;
 
 /** Stored event types that carry no standalone information for readers. */
-export const ACTIVITY_NOISE_TYPES = ["engine.item.updated", "engine.stream_event"] as const;
+export const ACTIVITY_NOISE_TYPES = [
+  "engine.item.updated",
+  "engine.stream_event",
+  "engine.text",
+  "turn.environment_progress",
+] as const;
 
 /** Health/credential maintenance remains inspectable but is not evidence of work advancing. */
 export const PROGRESS_NOISE_TYPES = [
@@ -41,6 +46,9 @@ export type ActivityItem = {
   text: string | null;
   truncated: boolean;
   size_bytes: number;
+  stream_id?: string;
+  transcript_text?: string;
+  transcript_excerpt?: boolean;
   created_at: Date;
 };
 
@@ -52,11 +60,184 @@ type StoredTurnEvent = {
   createdAt: Date;
 };
 
+export const RUN_PROGRESS_TYPES = [
+  "turn.phase",
+  "turn.environment_step",
+  "turn.environment_progress",
+];
+
+export const AGENT_PROGRESS_TYPES = {
+  hermes: [
+    "engine.system",
+    "engine.text",
+    "engine.reply_text",
+    "engine.tool_use",
+    "engine.tool_result",
+  ],
+  claude_code: [
+    "engine.system",
+    "engine.reply_started",
+    "engine.reply_text",
+    "engine.assistant",
+    "engine.user",
+  ],
+  codex: [
+    "engine.turn.started",
+    "engine.item.started",
+    "engine.item.updated",
+    "engine.item.completed",
+  ],
+};
+
+export function agentProgressTypes(engine: string): string[] {
+  return Object.hasOwn(AGENT_PROGRESS_TYPES, engine)
+    ? AGENT_PROGRESS_TYPES[engine as keyof typeof AGENT_PROGRESS_TYPES]
+    : [];
+}
+
+const RUN_PHASES = {
+  credentials: {
+    title: "Preparing GitHub access",
+    detail: "Loading project settings and obtaining repository credentials.",
+  },
+  workspace: {
+    title: "Starting the workspace",
+    detail: "Preparing the container and attaching the story’s workspace.",
+  },
+  environment: {
+    title: "Preparing the environment",
+    detail: "Getting repositories and project services ready.",
+  },
+  agent: { title: "Running the agent", detail: "The agent is working in the prepared workspace." },
+} as const;
+
+export function presentRunProgress(event: StoredTurnEvent, agentStartedAt?: Date) {
+  const data = record(event.data);
+  if (event.type.startsWith("engine.")) {
+    const { title, detail } = describeAgentProgress(event.type.slice("engine.".length), data);
+    return {
+      phase: "agent",
+      title,
+      detail,
+      percent: null,
+      started_at: (agentStartedAt ?? event.createdAt).toISOString(),
+      updated_at: event.createdAt.toISOString(),
+    };
+  }
+  const phase = event.type === "turn.phase" ? text(data.phase) : "environment";
+  if (!phase || !Object.hasOwn(RUN_PHASES, phase)) return null;
+  const labels = RUN_PHASES[phase as keyof typeof RUN_PHASES];
+  const environmentStep = event.type !== "turn.phase";
+  const value = data.percent;
+  return {
+    phase,
+    title: (environmentStep && text(data.step)) || labels.title,
+    detail: (environmentStep && text(data.detail)) || labels.detail,
+    percent:
+      environmentStep &&
+      typeof value === "number" &&
+      Number.isInteger(value) &&
+      value >= 0 &&
+      value <= 100
+        ? value
+        : null,
+    started_at: (environmentStep && text(data.startedAt)) || event.createdAt.toISOString(),
+    updated_at: event.createdAt.toISOString(),
+  };
+}
+
+function describeAgentProgress(type: string, data: Record<string, unknown>) {
+  const waiting = {
+    title: "Waiting for the model",
+    detail: "The agent is preparing its request or waiting for model output.",
+  };
+  const updating = {
+    title: "Agent update received",
+    detail: "The agent reported activity while working on the run.",
+  };
+  if (type === "system" || type === "turn.started") return waiting;
+  if (type === "text" || type === "reply_started" || type === "reply_text") {
+    return { title: "Generating a reply", detail: "The model started streaming reply text." };
+  }
+  if (type === "tool_use" || type === "tool_result") {
+    return {
+      title: describeEngineEvent(type, data).title,
+      detail:
+        type === "tool_use"
+          ? "Hermes started a tool in the workspace."
+          : "Hermes received the tool result.",
+    };
+  }
+  if (type === "assistant" || type === "user") {
+    const blocks = messageBlocks(data);
+    const tools = blocks.filter((block) => block.type === "tool_use");
+    const results = blocks.filter((block) => block.type === "tool_result");
+    if (tools.length) {
+      const names = tools.map((tool) => text(tool.name)?.slice(0, 100) ?? "tool");
+      return {
+        title: `Tool started: ${names.join(", ").slice(0, 180)}`,
+        detail: "Claude Code requested a workspace tool.",
+      };
+    }
+    if (results.length) {
+      return {
+        title: results.some((result) => result.is_error === true) ? "Tool failed" : "Tool finished",
+        detail: "Claude Code received the tool result.",
+      };
+    }
+    if (type === "assistant" && blocks.some((block) => block.type === "text" && text(block.text))) {
+      return {
+        title: "Agent message received",
+        detail: "Claude Code sent a message. It appears in the activity log.",
+      };
+    }
+    return updating;
+  }
+  const item = record(data.item);
+  if (item.type === "agent_message") {
+    return type === "item.completed"
+      ? {
+          title: "Agent message received",
+          detail: "Codex sent a message. It appears in the activity log.",
+        }
+      : { title: "Generating a reply", detail: "Codex reported an in-progress message." };
+  }
+  if (item.type === "reasoning") {
+    return { title: "Model progress reported", detail: "Codex reported a reasoning update." };
+  }
+  if (item.type === "mcp_tool_call" && type === "item.completed" && item.status === "failed") {
+    return { title: "Tool failed", detail: "Codex reported an unsuccessful tool call." };
+  }
+  if (item.type) {
+    return {
+      title: describeCodexItem(type !== "item.completed", item).title.slice(0, 180),
+      detail:
+        type === "item.completed"
+          ? "Codex completed this activity."
+          : "Codex reported ongoing activity.",
+    };
+  }
+  return updating;
+}
+
+function messageBlocks(data: Record<string, unknown>) {
+  const content = record(data.message).content;
+  return Array.isArray(content) ? content.map(record) : [];
+}
+
 export function presentTurnEvent(event: StoredTurnEvent): ActivityItem {
   const data = record(event.data);
   const sizeBytes = Buffer.byteLength(JSON.stringify(event.data ?? {}), "utf8");
   const described = describe(event.type, data);
   const bounded = bound(described.text);
+  const transcriptText =
+    (described.kind === "message" ||
+      described.kind === "reasoning" ||
+      described.kind === "result") &&
+    bounded.truncated
+      ? described.text?.slice(0, 64_000)
+      : undefined;
+  const streamId = text(data.stream_id)?.slice(0, 100);
   return {
     seq: event.seq,
     turn_id: event.turnId,
@@ -67,6 +248,12 @@ export function presentTurnEvent(event: StoredTurnEvent): ActivityItem {
     truncated: bounded.truncated || data.truncated === true,
     size_bytes: sizeBytes,
     created_at: event.createdAt,
+    ...(streamId === undefined ? {} : { stream_id: streamId }),
+    ...(transcriptText === undefined ? {} : { transcript_text: transcriptText }),
+    ...(data.excerpt === true ||
+    (transcriptText !== undefined && transcriptText.length < (described.text?.length ?? 0))
+      ? { transcript_excerpt: true }
+      : {}),
   };
 }
 
@@ -99,6 +286,12 @@ function describe(
       };
     case "turn.phase":
       return { kind: "lifecycle", title: "Run phase", text: text(data.phase) };
+    case "turn.environment_step":
+      return {
+        kind: "lifecycle",
+        title: text(data.step) ?? "Preparing the environment",
+        text: text(data.detail),
+      };
     case "workspace.health":
       return {
         kind: data.probe === "unavailable" ? "error" : "lifecycle",
@@ -184,7 +377,31 @@ function describeEngineEvent(
       text: `Operation: ${text(data.operation) ?? "unknown"}. ${recovered ? "Output collection resumed." : failed ? "The provider read could not continue." : "Reconnecting to the existing command; it has not been resubmitted."}`,
     };
   }
+  if (type === "tool_use" || type === "tool_result") {
+    const name = text(data.name)?.slice(0, 100);
+    const tool = name ? name.replaceAll("_", " ") : "tool";
+    const failed = type === "tool_result" && data.is_error === true;
+    const elapsed = typeof data.duration_ms === "number" ? duration(data.duration_ms) : null;
+    return {
+      kind: failed ? "error" : "tool",
+      title:
+        type === "tool_use"
+          ? `Tool started: ${tool}`
+          : failed
+            ? `Tool failed: ${tool}`
+            : `Tool finished: ${tool}`,
+      text: type === "tool_result" && elapsed ? `Duration ${elapsed}` : null,
+    };
+  }
   // Claude Code stream-json
+  if (type === "reply_text")
+    return {
+      kind: "message",
+      title: data.complete === true ? "Agent reply" : "Reply streaming",
+      text: text(data.text),
+    };
+  if (type === "reply_started")
+    return { kind: "lifecycle", title: "Reply started streaming", text: null };
   if (type === "system") {
     const model = text(data.model);
     return {
@@ -194,12 +411,9 @@ function describeEngineEvent(
     };
   }
   if (type === "assistant") {
-    const blocks = Array.isArray(record(data.message).content)
-      ? (record(data.message).content as unknown[])
-      : [];
-    const tools = blocks.map(record).filter((block) => block.type === "tool_use");
+    const blocks = messageBlocks(data);
+    const tools = blocks.filter((block) => block.type === "tool_use");
     const texts = blocks
-      .map(record)
       .filter((block) => block.type === "text" && typeof block.text === "string")
       .map((block) => String(block.text));
     if (tools.length > 0) {
@@ -214,10 +428,8 @@ function describeEngineEvent(
     return { kind: "message", title: "Agent message", text: texts.join("\n\n") || null };
   }
   if (type === "user") {
-    const blocks = Array.isArray(record(data.message).content)
-      ? (record(data.message).content as unknown[])
-      : [];
-    const results = blocks.map(record).filter((block) => block.type === "tool_result");
+    const blocks = messageBlocks(data);
+    const results = blocks.filter((block) => block.type === "tool_result");
     if (results.length === 0) return { kind: "other", title: "Engine input", text: null };
     const errored = results.some((result) => result.is_error === true);
     return {
@@ -231,6 +443,15 @@ function describeEngineEvent(
     };
   }
   if (type === "result") {
+    // Hermes reports its diagnostic in the structured result, including for older stored runs.
+    if (typeof data.exit_code === "number") {
+      const failed = data.exit_code !== 0;
+      return {
+        kind: failed ? "error" : "result",
+        title: failed ? "Hermes reported an error" : "Final response",
+        text: failed ? (text(data.error) ?? text(data.text)) : text(data.text),
+      };
+    }
     const isError = data.is_error === true;
     const subtype = text(data.subtype);
     return {

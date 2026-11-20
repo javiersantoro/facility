@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
-import { chmod, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { delimiter, dirname, join } from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -150,7 +151,24 @@ export function run(
   { cwd = repoRoot, label = [command, ...args].join(" "), environment = process.env } = {},
 ) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, env: environment, stdio: "inherit" });
+    const windowsCorepackArgs =
+      process.platform === "win32" && (command === "pnpm.cmd" || command === "corepack.cmd")
+        ? [
+            join(dirname(process.execPath), "node_modules", "corepack", "dist", "corepack.js"),
+            ...(command === "pnpm.cmd" ? ["pnpm"] : []),
+            ...args,
+          ]
+        : undefined;
+    const child = spawn(
+      windowsCorepackArgs ? process.execPath : command,
+      windowsCorepackArgs ?? args,
+      {
+        cwd,
+        env: environment,
+        stdio: "inherit",
+      },
+    );
+
     child.once("error", (error) => {
       const hint =
         error.code === "ENOENT"
@@ -164,6 +182,24 @@ export function run(
       else reject(new Error(`${label} exited with code ${code ?? "unknown"}`));
     });
   });
+}
+
+export async function withDevelopmentPnpm(environment, callback, root = repoRoot) {
+  if (process.platform !== "win32") return callback(environment);
+  // Turbo spawns pnpm by name. Give its children a Corepack shim without changing the user's PATH.
+  const directory = await mkdtemp(join(tmpdir(), "facility-dev-pnpm-"));
+  try {
+    await run("corepack.cmd", ["enable", "--install-directory", directory, "pnpm"], {
+      cwd: root,
+      environment,
+      label: "local Corepack pnpm shim",
+    });
+    const pathKey = Object.keys(environment).find((key) => key.toLowerCase() === "path") ?? "PATH";
+    const path = [directory, environment[pathKey]].filter(Boolean).join(delimiter);
+    return await callback({ ...environment, [pathKey]: path });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 export async function startDevelopment(root = repoRoot) {
@@ -219,11 +255,16 @@ export async function startDevelopment(root = repoRoot) {
   console.log("  Web   http://localhost:3400");
   console.log("  API   http://localhost:4400 (includes MCP)");
   console.log("  Docs  http://localhost:3500\n");
-  await run(pnpm, ["run", "dev:services"], {
-    cwd: root,
+  await withDevelopmentPnpm(
     environment,
-    label: "Facility development processes",
-  });
+    (serviceEnvironment) =>
+      run(pnpm, ["run", "dev:services"], {
+        cwd: root,
+        environment: serviceEnvironment,
+        label: "Facility development processes",
+      }),
+    root,
+  );
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {

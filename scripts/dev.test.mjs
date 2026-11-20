@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import test from "node:test";
 import {
   assertLocalDatabaseUrl,
@@ -9,6 +9,7 @@ import {
   developmentServiceEnvironment,
   prepareDevEnv,
   setEnvIfBlank,
+  withDevelopmentPnpm,
 } from "./dev.mjs";
 
 const example = [
@@ -103,4 +104,21 @@ test("passes only current development process settings", () => {
     DATABASE_URL: prepared.databaseUrl,
     FACILITY_DEV_ORIGINS: "tunnel.example.dev",
   });
+});
+
+test("Windows development services resolve the project Corepack shim before the user's pnpm", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const originalPath = process.env.PATH;
+  let directory;
+  await withDevelopmentPnpm({ Path: originalPath }, async (environment) => {
+    const [first, ...rest] = environment.Path.split(delimiter);
+    directory = first;
+    assert.equal(rest.join(delimiter), originalPath);
+    assert.equal(environment.PATH, undefined);
+    const shim = await readFile(join(directory, "pnpm.cmd"), "utf8");
+    assert.match(shim, /corepack.*pnpm[.]js/i);
+  });
+  assert.ok(directory);
+  await assert.rejects(stat(directory), { code: "ENOENT" });
 });

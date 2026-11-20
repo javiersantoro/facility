@@ -126,7 +126,7 @@ function AgentCard({
       <dl className="grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-2 text-[11.5px]">
         <dt className="text-(--dim)">engine</dt>
         <dd className="font-mono text-(--ink)">
-          {agent.engine === "claude_code" ? "Claude Code" : "Codex"}
+          {{ claude_code: "Claude Code", codex: "Codex", hermes: "Hermes Agent" }[agent.engine]}
         </dd>
         <dt className="text-(--dim)">model</dt>
         <dd className="break-all font-mono text-(--ink)">{agent.model}</dd>

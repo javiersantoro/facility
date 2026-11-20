@@ -7810,7 +7810,7 @@ export interface operations {
                                 name: string;
                                 manifestHash: string;
                                 /** @enum {string} */
-                                engine: "claude_code" | "codex";
+                                engine: "claude_code" | "codex" | "hermes";
                                 model: string;
                                 repositoryId: string;
                                 catalogCommitSha: string;
@@ -7860,7 +7860,7 @@ export interface operations {
                                     name: string;
                                     manifestHash: string;
                                     /** @enum {string} */
-                                    engine: "claude_code" | "codex";
+                                    engine: "claude_code" | "codex" | "hermes";
                                     model: string;
                                     repositoryId: string;
                                     catalogCommitSha: string;
@@ -8117,7 +8117,7 @@ export interface operations {
                                 name: string;
                                 manifestHash: string;
                                 /** @enum {string} */
-                                engine: "claude_code" | "codex";
+                                engine: "claude_code" | "codex" | "hermes";
                                 model: string;
                                 repositoryId: string;
                                 catalogCommitSha: string;
@@ -8167,7 +8167,7 @@ export interface operations {
                                     name: string;
                                     manifestHash: string;
                                     /** @enum {string} */
-                                    engine: "claude_code" | "codex";
+                                    engine: "claude_code" | "codex" | "hermes";
                                     model: string;
                                     repositoryId: string;
                                     catalogCommitSha: string;
@@ -8398,7 +8398,7 @@ export interface operations {
                             name: string;
                             manifestHash: string;
                             /** @enum {string} */
-                            engine: "claude_code" | "codex";
+                            engine: "claude_code" | "codex" | "hermes";
                             model: string;
                             repositoryId: string;
                             catalogCommitSha: string;
@@ -8742,7 +8742,7 @@ export interface operations {
                                 name: string;
                                 manifestHash: string;
                                 /** @enum {string} */
-                                engine: "claude_code" | "codex";
+                                engine: "claude_code" | "codex" | "hermes";
                                 model: string;
                                 repositoryId: string;
                                 catalogCommitSha: string;
@@ -8972,7 +8972,7 @@ export interface operations {
                                 name: string;
                                 manifestHash: string;
                                 /** @enum {string} */
-                                engine: "claude_code" | "codex";
+                                engine: "claude_code" | "codex" | "hermes";
                                 model: string;
                                 repositoryId: string;
                                 catalogCommitSha: string;
@@ -9022,7 +9022,7 @@ export interface operations {
                                     name: string;
                                     manifestHash: string;
                                     /** @enum {string} */
-                                    engine: "claude_code" | "codex";
+                                    engine: "claude_code" | "codex" | "hermes";
                                     model: string;
                                     repositoryId: string;
                                     catalogCommitSha: string;
@@ -10560,7 +10560,7 @@ export interface operations {
                         agents: {
                             name: string;
                             /** @enum {string} */
-                            engine: "claude_code" | "codex";
+                            engine: "claude_code" | "codex" | "hermes";
                             model: string;
                             reasoningEffort: string | null;
                             manifestHash: string;
@@ -14217,7 +14217,7 @@ export interface operations {
                     expected_commit_sha: string;
                     description: string;
                     /** @enum {string} */
-                    engine: "claude_code" | "codex";
+                    engine: "claude_code" | "codex" | "hermes";
                     model: string;
                     /** @enum {string|null} */
                     reasoning_effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" | null;

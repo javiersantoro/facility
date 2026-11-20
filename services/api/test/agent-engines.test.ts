@@ -10,6 +10,7 @@ import {
   ClaudeEventParser,
   CodexEngine,
   CodexEventParser,
+  HermesEngine,
   nativeSessionFromEvent,
   observationFailureEvidence,
 } from "../src/turns/engines.js";
@@ -34,14 +35,18 @@ const workspace: WorkspaceLocator = {
   volumeRef: "volume",
 };
 
-function manifest(engine: "claude_code" | "codex") {
-  const name = engine === "codex" ? "builder" : "architect";
+function manifest(engine: "claude_code" | "codex" | "hermes") {
+  const { name, model } = {
+    codex: { name: "builder", model: "gpt-5.5" },
+    claude_code: { name: "architect", model: "claude-opus-4-8" },
+    hermes: { name: "hermes", model: "qwen3-coder-next" },
+  }[engine];
   return parseAgentManifest(
     `---
 name: ${name}
 description: Test agent.
 engine: ${engine}
-model: ${engine === "codex" ? "gpt-5.5" : "claude-opus-4-8"}
+model: ${model}
 enabled: true
 options:
   reasoning_effort: high
@@ -92,6 +97,133 @@ class EngineRuntime implements WorkspaceRuntime {
 }
 
 describe("native agent engines", () => {
+  const endpoint = "http://host.docker.internal:1234/v1";
+
+  it("runs Hermes and keeps its final reply, usage, and session", async () => {
+    const stdout = [
+      { type: "system", subtype: "init", session_id: "", model: "qwen3-coder-next" },
+      { type: "text", text: "working" },
+      {
+        type: "result",
+        session_id: "20261118_160937_abc123",
+        exit_code: 0,
+        text: "done",
+        tokens: { input: 100, output: 20, cache_read: 3, cache_write: 2 },
+      },
+    ]
+      .map((event) => JSON.stringify(event))
+      .join("\n");
+    const runtime = new EngineRuntime({ exitCode: 0, stdout, stderr: "", durationMs: 12 });
+    const events: string[] = [];
+    const prompt = '-first line; echo "a"\nsecond line';
+    const result = await new HermesEngine(runtime).run({
+      turnId: "turn_hermes",
+      manifest: manifest("hermes"),
+      workspace,
+      prompt,
+      cwd: "repos/app",
+      nativeSessionId: "20261118_160001_def456",
+      environment: { HERMES_LM_STUDIO_URL: endpoint, HERMES_LM_STUDIO_TOKEN: "local-token" },
+      onEvent: (event) => events.push(event.type),
+    });
+    expect(runtime.command?.args?.slice(-11)).toEqual([
+      "hermes",
+      "--resume",
+      "20261118_160001_def456",
+      "chat",
+      "--provider",
+      "openai-api",
+      "--format",
+      "stream-json",
+      "--model",
+      "qwen3-coder-next",
+      `--query=${prompt}`,
+    ]);
+    expect(runtime.command?.env).toMatchObject({
+      HERMES_HOME: "/workspace/.facility/hermes",
+      OPENAI_BASE_URL: endpoint,
+      OPENAI_API_KEY: "local-token",
+      HERMES_CODEX_EVENT_STALE_TIMEOUT_SECONDS: "180",
+    });
+    expect(result).toMatchObject({
+      nativeSessionId: "20261118_160937_abc123",
+      output: "done",
+      model: "qwen3-coder-next",
+      usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 3, cacheWriteTokens: 2 },
+    });
+    expect(nativeSessionFromEvent(result.events.at(-1)!)).toBe(result.nativeSessionId);
+    expect(events).toEqual(["system", "reply_text", "reply_text", "result"]);
+  });
+
+  it.each([
+    0, 1,
+  ])("reports the Hermes result error instead of its session notice (exit %s)", async (exitCode) => {
+    const error = "Model context has 48,128 tokens. Hermes requires at least 64,000.";
+    const stdout = JSON.stringify({ type: "result", session_id: "local-123", exit_code: 1, error });
+    const runtime = new EngineRuntime({
+      exitCode,
+      stdout,
+      stderr: "Session: local-123",
+      durationMs: 12,
+    });
+    await expect(
+      new HermesEngine(runtime).run({
+        turnId: "turn_hermes",
+        manifest: manifest("hermes"),
+        workspace,
+        prompt: "work",
+        cwd: ".",
+        environment: { HERMES_LM_STUDIO_URL: endpoint },
+      }),
+    ).rejects.toMatchObject({ code: "agent_engine_failed", message: error });
+  });
+
+  it("keeps the Hermes process exit code when stderr contains only session notices", async () => {
+    const runtime = new EngineRuntime({
+      exitCode: 137,
+      stdout: '{"type":"system","subtype":"init","session_id":"local-123"}\n',
+      stderr: "Session: local-123\n\nsession_id: local-123\n",
+      durationMs: 12,
+    });
+    await expect(
+      new HermesEngine(runtime).run({
+        turnId: "turn_hermes",
+        manifest: manifest("hermes"),
+        workspace,
+        prompt: "work",
+        cwd: ".",
+        environment: { HERMES_LM_STUDIO_URL: endpoint },
+      }),
+    ).rejects.toMatchObject({
+      code: "agent_engine_failed",
+      message: expect.stringContaining("Hermes exited with status 137."),
+      details: { exitCode: 137 },
+    });
+  });
+
+  it.each([
+    [{ readOnly: true }, "agent_read_only_unsupported"],
+    [{ maxBudgetUsd: 1 }, "agent_budget_unsupported"],
+    [
+      { environment: { HERMES_LM_STUDIO_URL: "https://api.openai.com/v1" } },
+      "agent_provider_invalid",
+    ],
+  ] as const)("rejects unsupported Hermes execution before starting a CLI (%#)", async (options, code) => {
+    const runtime = new EngineRuntime({ exitCode: 0, stdout: "", stderr: "", durationMs: 0 });
+    await expect(
+      new HermesEngine(runtime).run({
+        turnId: "turn_hermes",
+        manifest: manifest("hermes"),
+        workspace,
+        prompt: "work",
+        cwd: ".",
+        environment: { HERMES_LM_STUDIO_URL: endpoint },
+        ...options,
+      }),
+    ).rejects.toMatchObject({ code });
+    expect(runtime.command).toBeUndefined();
+  });
+
   it.each([
     [{ OPENAI_API_KEY: "project-key" }, "project-key"],
     [{ OPENAI_API_KEY: "project-key", CODEX_API_KEY: "explicit-key" }, "explicit-key"],
@@ -116,6 +248,41 @@ describe("native agent engines", () => {
     expect(runtime.command?.env?.CODEX_API_KEY).toBe(expected);
     expect(environment).toEqual(original);
     if (expected) expect(JSON.stringify(runtime.command?.args)).not.toContain(expected);
+  });
+
+  it("streams Claude reply snapshots without forwarding thinking deltas", async () => {
+    const stream = (event: object) => ({ type: "stream_event", event });
+    const stdout =
+      [
+        { type: "system", subtype: "init", session_id: "claude-session" },
+        stream({ type: "message_start" }),
+        stream({
+          type: "content_block_delta",
+          delta: { type: "thinking_delta", thinking: "private" },
+        }),
+        stream({ type: "content_block_delta", delta: { type: "text_delta", text: "partial" } }),
+        stream({ type: "content_block_delta", delta: { type: "text_delta", text: "additional" } }),
+        { type: "result", session_id: "claude-session", result: "Final reply" },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join("\n") + "\n";
+    const runtime = new EngineRuntime({ exitCode: 0, stdout, stderr: "", durationMs: 12 });
+    const events: string[] = [];
+    const result = await new ClaudeCodeEngine(runtime).run({
+      turnId: "turn_claude",
+      manifest: manifest("claude_code"),
+      workspace,
+      prompt: "Respond",
+      cwd: ".",
+      onEvent: (event) => events.push(event.type),
+    });
+    expect(runtime.command?.args).toContain("--include-partial-messages");
+    expect(events).toEqual(["system", "reply_text", "reply_text", "result"]);
+    expect(result.events[1]?.data).toMatchObject({ text: "partial", complete: false });
+    expect(result.events[2]?.data).toMatchObject({ text: "partialadditional", complete: true });
+    expect(result.events[1]?.data.stream_id).toBe(result.events[2]?.data.stream_id);
+    expect(JSON.stringify(result.events)).not.toContain("private");
+    expect(result.output).toBe("Final reply");
   });
 
   it("parses chunked Claude stream-json and resumes with a budget when supplied", async () => {

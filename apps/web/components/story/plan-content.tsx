@@ -54,7 +54,7 @@ export function PlanContent({
                 <li key={agent.name} className="break-words">
                   {agent.name}{" "}
                   <span className="text-(--mut)">
-                    · {agent.engine === "codex" ? "Codex" : "Claude Code"} · {agent.model}
+                    · {{ claude_code: "Claude Code", codex: "Codex", hermes: "Hermes Agent" }[agent.engine]} · {agent.model}
                   </span>
                 </li>
               ))}
